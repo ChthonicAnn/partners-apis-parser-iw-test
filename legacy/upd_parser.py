@@ -1,35 +1,39 @@
-from dataclasses import dataclass, asdict
+from multiprocessing.connection import Client
+import traceback
+
+from common.config import CLICKHOUSE_CONFIG_RO
+from legacy.abstract_partners import AbstractPartner
+from legacy.partners.dsp_partners import DSPPartnerB, DSPPartnerF, DSPPartnerI, DSPPartnerM, DSPPartnerO
+from legacy.partners.ssp_partners import SSPPartnerA, SSPPartnerB, SSPPartnerC, SSPPartnerD, SSPPartnerM, SSPPartnerO, SSPPartnerS
 # from common.queue import queue
-from .config import *
 # from .import remote_file
-import requests
 import datetime
 import xml.etree.cElementTree as ET
 # import numpy as np
-import time
+# import time
 # from minio import Minio
-from io import BytesIO
-import uuid
-import re
+# from io import BytesIO
+# import uuid
+# import re
 
-from collections import defaultdict
-from functools import reduce
+# from collections import defaultdict
+# from functools import reduce
 
-from itertools import groupby
-from functools import partial
+# from itertools import groupby
+# from functools import partial
 # from .remote_file import load_pickle_from_minio
 
 import pandas as pd
-import json
+# import json
 # from clickhouse_driver import Client
-from dataclasses import dataclass
+from dataclasses import asdict
 # from .utils import read_clickhouse
 
 import xmlrpc.client
-import ssl
-from itertools import chain
+# import ssl
+# from itertools import chain
 
-from .partner_data.data import PartnerData2,PartnerData
+from .partner_data.data import PartnerData2, PartnerData
 # from .partner_data.partners import insert_recent_partner_s_data
 
 
@@ -53,221 +57,90 @@ class CookiesTransport(xmlrpc.client.SafeTransport):
         return super().parse_response(response)
 
 
-def load_insert_data(start_date, finish_date):
-    start_date = pd.to_datetime(start_date) if start_date else datetime.date.today()-datetime.timedelta(days=1)
-    finish_date = pd.to_datetime(finish_date) if finish_date else datetime.date.today()-datetime.timedelta(days=1)
-    data = []
-    start_date_str = start_date.strftime("%Y-%m-%d")
-    finish_date_str = finish_date.strftime("%Y-%m-%d")
-
-    # ____________________ SSP ______________________________________
-    def PARTNER_B_SSP_TOKEN():
-        return json.loads(requests.post('https://ssp-partner-b.example/auth',
-                                        data={'login': PARTNER_B_SSP_LOGIN_DATA['login'],
-                                              'password': PARTNER_B_SSP_LOGIN_DATA['password']}).text)['data']
-
-    def PARTNER_B_DSP_TOKEN():
-        return json.loads(requests.post('https://dsp-partner-b.example/token',
-                                        data={'login': PARTNER_B_DSP_LOGIN_DATA['login'],
-                                              'password': PARTNER_B_DSP_LOGIN_DATA['password']}).text)['data']
-
-    def PARTNER_A_SSP_TOKEN():
-        return requests.post("https://ssp-partner-a.example/oauth2/token",
-                             data={'grant_type': PARTNER_A_SSP_LOGIN['grant_type'],
-                                   'client_id': PARTNER_A_SSP_LOGIN['client_id'],
-                                   'username': PARTNER_A_SSP_LOGIN['username'],
-                                   'password': PARTNER_A_SSP_LOGIN['password'],
-                                   }
-                             ).json()['access_token']
-
-    def process_xml_data(_xml):
-        def extract_data(d):
-            date = d.attrib['date']
-            impressions = int(float(d.find('impressions').text))
-            revenue = float(d.find('revenue').text)
-            return date, impressions, revenue
-        return map(extract_data, _xml)
-
-    API_PARTNERS_SSP = {
-        'ssp-partner-m': {'json': {'urls': [f'https://ssp-partner-m.example/v2/statistics?date_from={start_date_str}&date_to={finish_date_str}',
-                                       ],
-                              'fun': lambda _json: map(lambda d: (d['date'], int(float(d['base']['shows'])), float(d['base']['spent'])),
-                                                       _json['items'][0]['rows']),
-                              'headers': {'Authorization': f'Bearer {PARTNER_M_SSP_ACCESS_TOKEN}'},
-                              'currency': 'rub',
-                              },
-                     },
-
-        'ssp-partner-b': {'json': {'urls': [f'https://ssp-partner-b.example/users/{PARTNER_B_SSP_LOGIN_DATA["user_id"]}/report?start_date={start_date_str}&end_date={finish_date_str}',
-                                   ],
-                          'fun': lambda _json: map(lambda d: (d, int(float(_json['data']['total']['count_imps'][d])),float(_json['data']['total']['net_payable_data'][d])),
-                                                   _json['data']['total']['date']),
-                          'headers': {'Authorization': f'Token {PARTNER_B_SSP_TOKEN()}'},
-                          'currency': 'rub',
-                          },
-                 },
-                 
-        'ssp-partner-o': {'json': {'urls': [f'https://ssp-partner-o.example/reporting/dsp?start_date={start_date_str}&end_date={finish_date_str}',
-                                    ],
-                           'fun': lambda _json: map(lambda d: (d['date'], int(float(d['impressionCount'])), float(d['spent'])),
-                                                    _json['data']),
-                           },
-                  },
-
-        'ssp-partner-s': {'json': {'urls': [f'https://ssp-partner-s.example/api/v1/dsp-report?campaign=display_eur&start={start_date_str}&end={finish_date_str}',
-                                     f'https://ssp-partner-s.example/api/v1/dsp-report?campaign=display_us&start={start_date_str}&end={finish_date_str}',
-                                     f'https://ssp-partner-s.example/api/v1/dsp-report?campaign=video_eur&start={start_date_str}&end={finish_date_str}',
-                                     ],
-                            'fun': lambda _json: map(lambda d: (d[0], int(float(d[1]['impressions'])), float(d[1]['revenue'])),
-                                                     _json.items()),
-                            },
-                   },
-        'ssp-partner-c': {'xml': {'urls': [f'https://ssp-partner-c.example/dsp-report.xml?start={start_date_str}&end={finish_date_str}',
-                                     ],
-                            'fun': lambda _xml: map(lambda d: (d.attrib['date'], int(float(d.find('impressions').text)), float(d.find('revenue').text)),
-                                                    _xml),
-                            },
-                    },
-        'ssp-partner-d': {'xml': {'urls': [f'https://ssp-partner-d.example/xml-report?format=xml&start={start_date_str}&end={finish_date_str}',
-                                        f'https://ssp-partner-d.example/xml-report?format=xml&start={start_date_str}&end={finish_date_str}',
-                                        f'https://ssp-partner-d.example/xml-report?format=xml&start={start_date_str}&end={finish_date_str}',
-                                         ],
-                                'fun': process_xml_data,
-                           },
-                   },
-    }
-
-    # ___________________________________ DSP _______________________________________
-    API_PARTNERS_DSP = {
-        # dsp-partner-i
-        71: {'json': {'urls': [f'https://dsp-partner-i.example/sspReport?start={start_date.strftime("%Y%m%d")}&end={finish_date.strftime("%Y%m%d")}',
-                               ],
-                      'fun': lambda _json: map(lambda d: (d['date'],
-                                                          int(float(d['imp'])),
-                                                          float(d['revenue'])),
-                                               _json['data']),
-                      },
-             },
-
-        # dsp-partner-o
-        65: {'json': {'urls': [f'https://dsp-partner-o.example/v1/reporting?start={start_date_str}&end={finish_date_str}&group=day',
-                               ],
-                      'fun': lambda _json: map(lambda d: (f"{d['day'][6:11]}-{d['day'][3:5]}-{d['day'][0:2]}",
-                                                          int(float(d['impressions'])), float(d['earnings']) / 1000),
-                                               _json['data']),
-                      'currency': 'rub',
-                      },
-             },
-
-        # dsp-partner-m
-        27: {'json': {'urls': [f'https://dsp-partner-m.example/api/v2/statistics?date_from={start_date_str}&date_to={finish_date_str}',
-                               ],
-                      'fun': lambda _json: chain.from_iterable(map(lambda d: list(map(lambda r: (r['date'], int(float(r['shows'])), float(r['amount'])),d['rows'])),
-                                                                   _json['items'])),
-                      'headers': {'Authorization': f'Bearer {PARTNER_M_DSP_ACCESS_TOKEN}'},
-                      'currency': 'rub',
-                      },
-             },
-
-        # dsp-partner-b
-        35: {'json': {'urls': [f'https://dsp-partner-b.example/users/{PARTNER_B_DSP_LOGIN_DATA["user_id"]}/sites/chart?start_date={start_date_str}&end_date={finish_date_str}',
-                               ],
-                      'fun': lambda _json: map(lambda d: (d,int(float(_json['data']['total']['count_imps'][d])),float(_json['data']['total']['total_pub_payable'][d])),
-                                               _json['data']['total']['date']),
-                      'headers': {'Authorization': f'Token {PARTNER_B_DSP_TOKEN()}'},
-                      'currency': 'rub',
-                      },
-             },
-
-        # dsp-partner-f
-        110: {'xml': {'urls': [f'https://dsp-partner-f.example/ssp_xml?start={start_date_str}&end={finish_date_str}',
-                               f'https://dsp-partner-f.example/ssp_xml?start={start_date_str}&end={finish_date_str}',
-                               ],
-                      'fun': lambda _xml: map(lambda d: (d.find('date').text, int(float(d.find('impressions').text)), float(d.find('revenue').text)),
-                                              _xml),
-                      },
-              },
-        }
-
-    def agg_list_2keys_2values(dd):  # [ssp/dsp,date,sum(imp),sum(money)]
-        q = {}
-        for x in dd:
-            key = str(x.ssp) + str(x.dsp_id) + str(x.date)
-            if key in q:
-                q[key].imps += x.imps
-                q[key].spent += x.spent
+def ok_parser(normal_partner: AbstractPartner, start_date, finish_date):
+    print('ok_parser start')
+    print(start_date, finish_date)
+    dd = []
+    normal_partner.authentificate()
+    start_date_str = normal_partner.format_date(start_date)
+    finish_date_str = normal_partner.format_date(finish_date)
+    urls = normal_partner.get_urls(start_date_str, finish_date_str)
+    for url in urls:
+        try:
+            text = normal_partner.request_data(url)
+            print(text)
+            # print(res.text)
+            dsp_id = 0
+            ssp = ''
+            if normal_partner.id.isdigit():
+                dsp_id = int(normal_partner.id)
             else:
-                q[key] = x
-        return list(q.values())
+                ssp = normal_partner.id
+            for record in normal_partner.norm_parse(text):
+                partner_data = PartnerData(
+                    ssp=ssp,
+                    dsp_id=dsp_id,
+                    date=pd.to_datetime(record.date),
+                    imps=record.imps,
+                    spent=record.spent,
+                    currency=normal_partner.currency,
+                )
+                dd.append(partner_data)
 
-    def process_ssp(ssp):
-        dd = []
-        for urltype in API_PARTNERS_SSP[ssp]:
-            if urltype in ('json', 'xml', 'txt'):
-                fun = API_PARTNERS_SSP[ssp][urltype]['fun']
-                for url in API_PARTNERS_SSP[ssp][urltype]['urls']:
-                    try:
-                        print(ssp, urltype, fun, url)
-                        head = API_PARTNERS_SSP[ssp][urltype].get('headers', None)
-                        print(f'header={head}')
-                        res = requests.get(url, headers=head)
-                        print(res)
-                        print(res.text)
-                        if urltype == 'json':
-                            _data = json.loads(res.text)
-                        elif urltype == 'xml':
-                            _data = ET.fromstring(res.text)
-                        elif urltype == 'txt':
-                            _data = res.text
-                        else:
-                            _data = None
-                        dd = dd + list(
-                            map(lambda d: PartnerData(ssp=ssp,
-                                                      date=pd.to_datetime(d[0]),
-                                                      imps=d[1], spent=d[2],
-                                                      currency=API_PARTNERS_SSP[ssp][urltype].get('currency', 'usd')),
-                                list(fun(_data))))
-                    except Exception as e:
-                        print(e)
-        return dd
+        except Exception as e:
+            traceback.print_exc()
+            print()
+            print()
+            print(e)
+            print('Exception')
+        print('ok_parser finish')
+        print(dd)
+    return dd
 
-    def process_dsp(dsp_id):
-        dd = []
-        for urltype in API_PARTNERS_DSP[dsp_id]:
-            if urltype in ('json', 'xml', 'txt'):
-                fun = API_PARTNERS_DSP[dsp_id][urltype]['fun']
-                for url in API_PARTNERS_DSP[dsp_id][urltype]['urls']:
-                    try:
-                        print(dsp_id, urltype, fun, url)
-                        res = requests.get(url,
-                                           headers=API_PARTNERS_DSP[dsp_id][urltype].get('headers', None))
-                        print(res)
-                        print(res.text)
-                        if urltype == 'json':
-                            _data = json.loads(res.text)
-                        elif urltype == 'xml':
-                            _data = ET.fromstring(res.text)
-                        elif urltype == 'txt':
-                            _data = res.text
-                        else:
-                            _data = None
-                        dd = dd + list(
-                            map(lambda d: PartnerData(dsp_id=dsp_id, date=pd.to_datetime(d[0]), imps=d[1], spent=d[2],currency=API_PARTNERS_DSP[dsp_id][urltype].get('currency','usd')),
-                                list(fun(_data))))
-                    except Exception as e:
-                        print(e)
-        return dd
+
+def agg_list_2keys_2values(dd):  # [ssp/dsp,date,sum(imp),sum(money)]
+    q = {}
+    for x in dd:
+        key = str(x.ssp) + str(x.dsp_id) + str(x.date)
+        if key in q:
+            q[key].imps += x.imps
+            q[key].spent += x.spent
+        else:
+            q[key] = x
+    return list(q.values())
+
+
+def load_insert_data(start_date, finish_date):
+    start_date = pd.to_datetime(start_date) if start_date else datetime.date.today() - datetime.timedelta(days=1)
+    finish_date = pd.to_datetime(finish_date) if finish_date else datetime.date.today() - datetime.timedelta(days=1)
+    data = []
+
+    NORMAL_PARTNERS = [
+        SSPPartnerM(),
+        SSPPartnerB(),
+        SSPPartnerO(),
+        SSPPartnerS(),
+        SSPPartnerC(),
+        SSPPartnerD(),
+        DSPPartnerI(),
+        DSPPartnerO(),
+        DSPPartnerM(),
+        DSPPartnerB(),
+        DSPPartnerF(),
+        SSPPartnerA(),
+    ]
+
 
     for normal_partner in NORMAL_PARTNERS:
-        data += agg_list_2keys_2values(ok_parser(normal_partner))
+        data += agg_list_2keys_2values(ok_parser(normal_partner, start_date, finish_date))
 
-    # __________________ SSP _____________________________________________________
-    for ssp in API_PARTNERS_SSP:
-        data += agg_list_2keys_2values(process_ssp(ssp))
+    # # __________________ SSP _____________________________________________________
+    # for ssp in API_PARTNERS_SSP:
+    #     data += agg_list_2keys_2values(process_ssp(ssp))
 
-    # __________________________________ DSP _________________________________________________________
-    for dsp_id in API_PARTNERS_DSP:
-        data += agg_list_2keys_2values(process_dsp(dsp_id))
+    # # __________________________________ DSP _________________________________________________________
+    # for dsp_id in API_PARTNERS_DSP:
+    #     data += agg_list_2keys_2values(process_dsp(dsp_id))
 
     # ### Processing S - CUSTOM
     # print(f"loading partner S")
@@ -279,9 +152,9 @@ def load_insert_data(start_date, finish_date):
     #             proxy.partner_s.login(PARTNER_S_DSP_LOGIN, PARTNER_S_DSP_TOKEN)
 
     #         with xmlrpc.client.ServerProxy("https://dsp-partner-s.example/xmlrpc/", transport) as proxy:
-    #             res = pd.DataFrame(proxy.rtb.get_openrtb_stats((start_date).strftime("%Y-%m-%d %H:%M:%S"), 
-    #                                                             finish_date.strftime("%Y-%m-%d %H:%M:%S"), 
-    #                                                             1, 
+    #             res = pd.DataFrame(proxy.rtb.get_openrtb_stats((start_date).strftime("%Y-%m-%d %H:%M:%S"),
+    #                                                             finish_date.strftime("%Y-%m-%d %H:%M:%S"),
+    #                                                             1,
     #                                                             ep))
     #             res['date'] = res['date_view'].apply(lambda x: pd.to_datetime(str(x), format = '%Y%m%dT%H:%M:%S').date())
     #             result = pd.concat((result, res))
@@ -296,7 +169,6 @@ def load_insert_data(start_date, finish_date):
     #                           imps=int(row['imps']),
     #                           spent=float(row['amount']),
     #                           currency='rub') for _,row in result.iterrows()]
-
 
     # ### Processing partner G : 123 - CUSTOM
     # # G : 123
@@ -319,7 +191,6 @@ def load_insert_data(start_date, finish_date):
     #     except Exception as e:
     #         print(e)
     # data += agg_list_2keys_2values(dd)
-
 
     # ### Processing partner B dsp - CUSTOM
     # print("Processing partner B dsp")
@@ -362,15 +233,17 @@ def load_insert_data(start_date, finish_date):
 
     # data += agg_list_2keys_2values(b_dsp_data)
 
-    print("FINAL PartnerData for partners :", data)
+    # print("FINAL PartnerData for partners :", data,)
+    # for pr in data:
+    #     print(pr.dsp_id, pr.ssp, pr)
 
-    return data
+    # return data
 
-    # query = "INSERT INTO dbname.partner_data (*) VALUES"
-    # client = Client(CLICKHOUSE_CONFIG_PROD['host'])
-    # client.execute(query, (asdict(row) for row in data))
+    query = "INSERT INTO dbname.partner_data (*) VALUES"
+    client = Client(CLICKHOUSE_CONFIG_RO['host'])
+    client.execute(query, (asdict(row) for row in data))
 
 
 def Partners_data_loader(start_date=None, finish_date=None):
     job = queue("load_insert_data", service="api").enqueue(load_insert_data, start_date, finish_date)
-    return { 'job_id': job.get_id() }, 200
+    return {'job_id': job.get_id()}, 200
