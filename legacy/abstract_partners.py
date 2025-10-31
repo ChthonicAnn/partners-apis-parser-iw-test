@@ -1,9 +1,8 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 import datetime
+import httpx
 from typing import Any, Dict, List
-
-import requests
 
 
 @dataclass
@@ -20,7 +19,7 @@ class AbstractPartner(ABC):
     currency: str = 'usd'
     _headers: Dict[str, str] = field(default_factory=dict)
 
-    def authentificate(self) -> None:
+    async def authentificate(self) -> None:
         pass
 
     def format_date(self, date: datetime) -> Any:
@@ -31,8 +30,10 @@ class AbstractPartner(ABC):
     def get_urls(self, start_date, finish_date) -> List[Any]:
         pass
 
-    def request_data(self, url) -> Any:
-        return requests.get(url, headers=self._headers).text
+    async def request_data(self, url) -> str:
+        async with httpx.AsyncClient() as client:
+            response = await client.get(url, headers=self._headers)
+            return response.text
 
     @abstractmethod
     def norm_parse(self, text: str) -> List[PartnerRecord]:

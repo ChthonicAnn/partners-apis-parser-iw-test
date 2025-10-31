@@ -5,7 +5,7 @@ import json
 from typing import Dict
 import xml.etree.cElementTree as ET
 
-import requests
+import httpx
 
 from legacy.abstract_partners import AbstractPartner, PartnerRecord
 from legacy.config import PARTNER_A_SSP_LOGIN, PARTNER_B_SSP_LOGIN_DATA, PARTNER_M_SSP_ACCESS_TOKEN
@@ -41,17 +41,18 @@ class SSPPartnerB(AbstractPartner):
     id: str = 'ssp-partner-b'
     currency: str = 'rub'
 
-    def authentificate(self):
+    async def authentificate(self):
         """Получаем токен и сохраняем его в headers."""
-        response = requests.post(
-            'https://ssp-partner-b.example/auth',
-            data={
-                'login': PARTNER_B_SSP_LOGIN_DATA['login'],
-                'password': PARTNER_B_SSP_LOGIN_DATA['password']
-            }
-        )
-        token = response.json()['data']
-        self._headers['Authorization'] = f'Token {token}'
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                'https://ssp-partner-b.example/auth',
+                data={
+                    'login': PARTNER_B_SSP_LOGIN_DATA['login'],
+                    'password': PARTNER_B_SSP_LOGIN_DATA['password']
+                }
+            )
+            token = response.json()['data']
+            self._headers['Authorization'] = f'Token {token}'
 
     def get_urls(self, start_date, finish_date):
         return [f'https://ssp-partner-b.example/users/{PARTNER_B_SSP_LOGIN_DATA["user_id"]}/report?start_date={start_date}&end_date={finish_date}',
@@ -165,19 +166,20 @@ class SSPPartnerA(AbstractPartner):
     urltype: str = 'json'
     id: str = 'superpartner'
 
-    def authentificate(self):
+    async def authentificate(self):
         """Получаем токен и сохраняем его в headers."""
-        response = requests.post(
-            "https://ssp-partner-a.example/oauth2/token",
-            data={
-                'grant_type': PARTNER_A_SSP_LOGIN['grant_type'],
-                'client_id': PARTNER_A_SSP_LOGIN['client_id'],
-                'username': PARTNER_A_SSP_LOGIN['username'],
-                'password': PARTNER_A_SSP_LOGIN['password'],
-            }
-        )
-        token = response.json()['access_token']
-        self._headers['Authorization'] = f'Bearer {token}'
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                "https://ssp-partner-a.example/oauth2/token",
+                data={
+                    'grant_type': PARTNER_A_SSP_LOGIN['grant_type'],
+                    'client_id': PARTNER_A_SSP_LOGIN['client_id'],
+                    'username': PARTNER_A_SSP_LOGIN['username'],
+                    'password': PARTNER_A_SSP_LOGIN['password'],
+                }
+            )
+            token = response.json()['access_token']
+            self._headers['Authorization'] = f'Bearer {token}'
 
     def format_date(self, date: datetime):
         date_str = date.strftime("%Y%m%d")

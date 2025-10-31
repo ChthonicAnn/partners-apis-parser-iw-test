@@ -1,11 +1,11 @@
-import builtins
-import inspect
-from colorama import Fore, Style
+from dataclasses import asdict
+from unittest.mock import AsyncMock
 from pandas import Timestamp
 import json
 
 from legacy.partner_data.data import PartnerData
-from legacy.upd_parser import load_insert_data
+from legacy.parser import load_insert_data
+import legacy.parser as parser
 
 
 # Все тестовые данные по URL в одном словаре
@@ -42,7 +42,7 @@ TEST_GET_RESPONSES = {
         ]
     },
 
-    # ssp-partner-s (три кампании)
+    # ssp-partner-s
     "https://ssp-partner-s.example/api/v1/dsp-report?campaign=display_eur&start=2025-01-01&end=2025-03-01": {
         "2025-01-01": {"impressions": 1000, "revenue": 10.0},
         "2025-01-02": {"impressions": 1200, "revenue": 12.5},
@@ -71,7 +71,7 @@ TEST_GET_RESPONSES = {
         </root>
         """,
 
-    # ssp-partner-d (XML, трижды вызывается)
+    # ssp-partner-d (XML)
     "https://ssp-partner-d.example/xml-report?format=xml&start=2025-01-01&end=2025-03-01":
         """
         <root>
@@ -85,6 +85,25 @@ TEST_GET_RESPONSES = {
             </day>
         </root>
         """,
+
+    # superpartner
+    "https://superpartner.example/v1/api/report?token=verisecret&start_date=20250101&end_date=20250301&group=date": {
+        "code": 0,
+        "message": "success",
+        "total_count": 1,
+        "data": {
+            "20250731": {
+                "impression_count": 1000000,
+                "click_count": 50000,
+                "cost": 123.45
+            },
+            "20250801": {
+                "impression_count": 1200000,
+                "click_count": 60000,
+                "cost": 150.75
+            },
+        },
+    },
 
     # ---------- DSP ----------
     # dsp-partner-i
@@ -127,7 +146,7 @@ TEST_GET_RESPONSES = {
         }
     },
 
-    # dsp-partner-f (XML, два вызова)
+    # dsp-partner-f (XML)
     "https://dsp-partner-f.example/ssp_xml?start=2025-01-01&end=2025-03-01":
         """
         <root>
@@ -145,16 +164,19 @@ TEST_GET_RESPONSES = {
         """,
 }
 
+# Проверить что пост-функция вызывалась
+# Проверка что пришли данные
+# Проверка что передали нужный токен при гет-запросе
 # Фиктивные ответы POST-запросов SSP и DSP партнёров
 TEST_POST_RESPONSES = {
     # PARTNER_B_SSP_TOKEN
-    "https://ssp-partner-b.example/auth": json.dumps({
+    "https://ssp-partner-b.example/auth": {
         "data": "SSP_PARTNER_B_TOKEN"
-    }),
+    },
     # PARTNER_B_DSP_TOKEN
-    "https://dsp-partner-b.example/token": json.dumps({
+    "https://dsp-partner-b.example/token": {
         "data": "DSP_PARTNER_B_TOKEN"
-    }),
+    },
     # PARTNER_A_SSP_TOKEN
     "https://ssp-partner-a.example/oauth2/token": {
         "access_token": "SSP_PARTNER_A_ACCESS_TOKEN"
@@ -184,62 +206,84 @@ EXPECTED_RESULT = [
     PartnerData(date=Timestamp('2025-01-01 00:00:00'), dsp_id=35, ssp='', imps=1400, spent=14.2, currency='rub'),
     PartnerData(date=Timestamp('2025-01-02 00:00:00'), dsp_id=35, ssp='', imps=1600, spent=16.8, currency='rub'),
     PartnerData(date=Timestamp('2025-01-01 00:00:00'), dsp_id=110, ssp='', imps=1800, spent=19.8, currency='usd'),
-    PartnerData(date=Timestamp('2025-01-02 00:00:00'), dsp_id=110, ssp='', imps=2400, spent=25.0, currency='usd')
+    PartnerData(date=Timestamp('2025-01-02 00:00:00'), dsp_id=110, ssp='', imps=2400, spent=25.0, currency='usd'),
+    PartnerData(date=Timestamp('2025-07-31 00:00:00'), dsp_id=0, ssp='superpartner', imps=1000000, spent=123.45, currency='usd'),
+    PartnerData(date=Timestamp('2025-08-01 00:00:00'), dsp_id=0, ssp='superpartner', imps=1200000, spent=150.75, currency='usd'),
 ]
 
-# --- Перехват вызовов print из тестируемой функции, чтобы подставить имя функции и красить в разные цвета ---
-original_print = builtins.print
 
+def test_load_insert_data_with_insert(mocker):
+    """Проверяет корректную загрузку данных через HTTP и их вставку в ClickHouse."""
+    # ----------------- Arrange -----------------
+    mock_client_async = mocker.patch("httpx.AsyncClient", autospec=True)
+    mock_instance = mock_client_async.return_value.__aenter__.return_value
 
-def tagged_print(*args, **kwargs):
-    stack = inspect.stack()
-    # Caller of print
-    if len(stack) > 1:
-        caller = stack[1].function
-    else:
-        caller = "?"
-    # If print called from test(), highlight as TEST
-    if caller.startswith("test"):
-        prefix = f"{Fore.CYAN}[TEST]{Style.RESET_ALL}"
-    else:
-        prefix = f"{Fore.YELLOW}[{caller}]{Style.RESET_ALL}"
-    original_print(prefix, *args, **kwargs)
+    mock_post = AsyncMock()
+    mock_get = AsyncMock()
 
-
-def test_load_insert_data(mocker):
-    '''Функция для тестирования всего ебучего парсера.'''
-
-    # Для красивеньких принтов. Перед сдачей удалить нахуй
-    print()
-    builtins.print = tagged_print
-
-    # Arrange
-    mock_post = mocker.patch("requests.post")
-    mock_get = mocker.patch("requests.get")
+    mock_client = mocker.Mock()
+    mocker.patch("legacy.upd_parser.Client", return_value=mock_client)
 
     def mock_side_effect(url, TEST_RESPONSE):
         '''Функция, которая решает, какой ответ вернуть в зависимости от URL.'''
-        if url in TEST_RESPONSE:
-            mock_response = mocker.Mock()
-            data = TEST_RESPONSE[url]
-            if isinstance(data, str):  # это .text
-                mock_response.text = data
-            elif isinstance(data, dict):  # это .json()
-                mock_response.text = json.dumps(data)
-                mock_response.json = lambda: data
-            return mock_response
-        raise ValueError(f"Неожиданный URL: {url}")
+        mock_response = mocker.Mock()
+        data = TEST_RESPONSE.get(url)
+        if isinstance(data, str):
+            mock_response.text = data
+        elif isinstance(data, dict):
+            mock_response.text = json.dumps(data)
+            mock_response.json = lambda: data
+        return mock_response
 
-    # Назначаем side_effect
     mock_post.side_effect = lambda url, *_args, **_kwargs: mock_side_effect(url, TEST_POST_RESPONSES)
     mock_get.side_effect = lambda url, *_args, **_kwargs: mock_side_effect(url, TEST_GET_RESPONSES)
 
-    # Act
-    RESULT = load_insert_data("01.01.2025", "03.01.2025")
+    mock_instance.post = mock_post
+    mock_instance.get = mock_get
 
-    # Assert
-    assert RESULT == EXPECTED_RESULT
-    print("\n\nCALLS GET")
-    print(mock_get.mock_calls)
-    print("\n\nCALLS POST")
-    print(mock_post.mock_calls)
+    # ----------------- Act -----------------
+    load_insert_data("01.01.2025", "03.01.2025")
+
+    # ----------------- Assert -----------------
+    mock_client.execute.assert_called_once()
+
+    called_args, _ = mock_client.execute.call_args
+    query_arg = called_args[0]
+    values_arg_gen = called_args[1]
+
+    assert query_arg == "INSERT INTO dbname.partner_data (*) VALUES"
+
+    values_list = list(values_arg_gen)
+    assert len(values_list) == len(EXPECTED_RESULT)
+
+    for result in EXPECTED_RESULT:
+        assert asdict(result) in values_list
+
+
+# @pytest.mark.only
+def test_partners_data_loader(mocker):
+    """Тестирует функцию Partners_data_loader, проверяя создание задачи в очереди и возврат job_id."""
+    # ----------------- Arrange -----------------
+    mock_job = mocker.Mock()
+    mock_job.get_id.return_value = 12345
+
+    mock_queue_instance = mocker.Mock()
+    mock_queue_instance.enqueue.return_value = mock_job
+
+    mock_load_insert_data = mocker.patch("legacy.upd_parser.load_insert_data")
+
+    mocker.patch.dict(parser.__dict__, {"queue": mocker.Mock(return_value=mock_queue_instance)})
+
+    start_date = "2025-01-01"
+    finish_date = "2025-01-03"
+
+    # ----------------- Act -----------------
+    result, status = parser.Partners_data_loader(start_date, finish_date)
+
+    # ----------------- Assert -----------------
+    parser.queue.assert_called_once_with("load_insert_data", service="api")
+    mock_queue_instance.enqueue.assert_called_once_with(mock_load_insert_data, start_date, finish_date)
+    mock_job.get_id.assert_called_once()
+
+    assert status == 200
+    assert result == {"job_id": 12345}

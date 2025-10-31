@@ -5,7 +5,7 @@ import json
 from typing import Dict
 import xml.etree.cElementTree as ET
 
-import requests
+import httpx
 
 from legacy.abstract_partners import AbstractPartner, PartnerRecord
 from legacy.config import PARTNER_B_DSP_LOGIN_DATA, PARTNER_M_DSP_ACCESS_TOKEN
@@ -95,17 +95,18 @@ class DSPPartnerB(AbstractPartner):
     id: str = '35'
     currency: str = 'rub'
 
-    def authentificate(self):
+    async def authentificate(self):
         """Получаем токен и сохраняем его в headers."""
-        response = requests.post(
-            'https://dsp-partner-b.example/token',
-            data={
-                'login': PARTNER_B_DSP_LOGIN_DATA['login'],
-                'password': PARTNER_B_DSP_LOGIN_DATA['password']
-            }
-        )
-        token = response.json()['data']
-        self._headers['Authorization'] = f'Token {token}'
+        async with httpx.AsyncClient() as client:
+            response = await client.post(
+                'https://dsp-partner-b.example/token',
+                data={
+                    'login': PARTNER_B_DSP_LOGIN_DATA['login'],
+                    'password': PARTNER_B_DSP_LOGIN_DATA['password']
+                }
+            )
+            token = response.json()['data']
+            self._headers['Authorization'] = f'Token {token}'
 
     def get_urls(self, start_date, finish_date):
         return [f'https://dsp-partner-b.example/users/{PARTNER_B_DSP_LOGIN_DATA["user_id"]}/sites/chart?start_date={start_date}&end_date={finish_date}',
