@@ -222,7 +222,7 @@ def test_load_insert_data_with_insert(mocker):
     mock_get = AsyncMock()
 
     mock_client = mocker.Mock()
-    mocker.patch("legacy.upd_parser.Client", return_value=mock_client)
+    mocker.patch("legacy.parser.Client", return_value=mock_client)
 
     def mock_side_effect(url, TEST_RESPONSE):
         '''Функция, которая решает, какой ответ вернуть в зависимости от URL.'''
@@ -270,7 +270,7 @@ def test_partners_data_loader(mocker):
     mock_queue_instance = mocker.Mock()
     mock_queue_instance.enqueue.return_value = mock_job
 
-    mock_load_insert_data = mocker.patch("legacy.upd_parser.load_insert_data")
+    mock_load_insert_data = mocker.patch("legacy.parser.load_insert_data")
 
     mocker.patch.dict(parser.__dict__, {"queue": mocker.Mock(return_value=mock_queue_instance)})
 
